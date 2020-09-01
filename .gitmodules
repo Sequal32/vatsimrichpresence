@@ -1,0 +1,3 @@
+[submodule "modules/vatsimfsdparser"]
+	path = modules/vatsimfsdparser
+	url = git@github.com:Sequal32/vatsimfsdparser.git

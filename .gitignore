@@ -1,0 +1,6 @@
+/target
+/libsrc
+.vscode
+*.bat
+Cargo.lock
+*.dat
