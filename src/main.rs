@@ -1,17 +1,19 @@
+mod tracker;
+
 use discord_game_sdk::{Discord, Activity, CreateFlags};
-use fsdparser::{Sniffer, PacketSource, PacketTypes, ClientQueryPayload, ATCManager, PilotManager, NetworkClientType, ATCPosition, PilotPosition, NetworkClient, NetworkFacility};
+use fsdparser::{Sniffer, PacketSource, PacketTypes, ClientQueryPayload, NetworkFacility};
 use pnet::datalink::NetworkInterface;
-use std::{collections::{HashMap, HashSet}, sync::Arc, time::{SystemTime, Duration, self}};
+use tracker::Tracker;
+use std::sync::Arc;
 use std::{io::{Write, Read}, sync::Mutex};
 use std::fs::File;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use systray::Application;
-use text_io::{self, read, };
-use webview::*;
 
-const config_filename: &str = "config.dat";
+const CONFIG_FILENAME: &str = "config.dat";
 
 fn get_time() -> i64 {
-    time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs() as i64
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
 }
 
 fn main() {
@@ -22,11 +24,11 @@ fn main() {
 
     //Prompts user for the interface to use
     let mut interfaces = sniffer.get_available_interfaces();
-    let mut selected_interface: Arc<Mutex<Option<NetworkInterface>>> = Arc::new(Mutex::new(None));
+    let selected_interface: Arc<Mutex<Option<NetworkInterface>>> = Arc::new(Mutex::new(None));
 
     // Read interface from config
     let mut last_interface: Option<NetworkInterface> = None;
-    let mut match_interface: String = match File::open(config_filename) {
+    let match_interface: String = match File::open(CONFIG_FILENAME) {
         Ok(mut file) => {
             let mut buf = vec![];
             file.read_to_end(&mut buf).expect("Could not read config file! Try deleting it.");
@@ -34,68 +36,44 @@ fn main() {
         }
         Err(_) => "".to_string()
     };
-
-    for (index, interface) in interfaces.iter().enumerate() {
+    for (_, interface) in interfaces.iter().enumerate() {
         let selected_interface = selected_interface.clone();
         let desc = interface.description.to_string();
         let interface_object = interface.clone();
-
+        // Match interface with config with available interfaces
         if match_interface == interface.name {
             *selected_interface.lock().unwrap() = Some(interface.clone());
         }
-
+        // Append interface for selection in toolbar
         app.add_menu_item(&desc, move |_| -> Result<(), systray::Error> {
             let mut selected_interface=  selected_interface.lock().unwrap();
             *selected_interface = Some(interface_object.clone());
             Ok(())
-        });
+        }).ok();
     }
-
-    // Attempt to find callsign
-    let mut last_callsign: String = "".to_string();
-    let mut current_callsign: String = "".to_string();
-    let mut current_atc_position: Option<ATCPosition> = None;
-    let mut current_pilot_position: Option<PilotPosition> = None;
-
-    let mut pilot_manager = PilotManager::new();
-    let mut tracked_aircraft: HashSet<String> = HashSet::new();
-
-    let mut counter_set: HashMap<String, SystemTime> = HashMap::new();
-
-    // lower position counters
-    let mut squawk_counter: usize = 0;
-    let mut strip_counter: usize = 0;
-
-    let mut tick = 0;
-    let mut start_time: i64 = get_time();
-
-    let mut client: Discord<()> = Discord::with_create_flags(748578379648991273, CreateFlags::Default).expect("Failed to connect to discord!");
-
-    let mut check_aircraft = |target: &String| -> bool {
-        let last_dur = counter_set.get(target);
-        let now = time::SystemTime::now();
-        if last_dur.is_none() || (now.duration_since(*last_dur.unwrap()).unwrap().as_secs() > 60) {
-            counter_set.insert(target.to_string(), now);
-            return true;
-        }
-        return false;
-    };
-
     // Handle toolbar inputs
     std::thread::spawn(move || {
         app.wait_for_message().ok();
     });
-    // Track handoffs
+    
+    // Variables for rich presence timing
+    let mut tick = 0;
+    let mut start_time: i64 = get_time();
+
+    let mut client: Discord<()> = Discord::with_create_flags(748578379648991273, CreateFlags::Default).expect("Failed to connect to discord!");
+    let mut tracker = Tracker::new();
+
     loop {
         let selected_interface=  selected_interface.lock().unwrap();
+        // On interface selected
         if last_interface != *selected_interface {
             let new_interface = selected_interface.as_ref().unwrap().clone();
             sniffer.set_user_interface(&new_interface);
             sniffer.start();
 
-            match File::create(config_filename) {
+            match File::create(CONFIG_FILENAME) {
                 Ok(mut file) => {
-                    file.write(new_interface.name.as_bytes());
+                    file.write(new_interface.name.as_bytes()).ok();
                 }
                 Err(_) => {}
             }
@@ -107,75 +85,63 @@ fn main() {
             match sniffer.next() {
                 Some(PacketSource::Client(packet)) => match packet {
                     PacketTypes::ClientQuery(query) => match query.payload {
-                        ClientQueryPayload::AcceptHandoff(aircraft, atc) => {tracked_aircraft.insert(aircraft);},
-                        ClientQueryPayload::DropTrack(aircraft) => {tracked_aircraft.remove(&aircraft);},
-                        ClientQueryPayload::InitiateTrack(aircraft) => {tracked_aircraft.insert(aircraft);},
-                        ClientQueryPayload::SetBeaconCode(aircraft, _) => {
-                            if check_aircraft(&aircraft) {
-                                squawk_counter += 1;
-                            }
-                        }
+                        ClientQueryPayload::AcceptHandoff(aircraft, _) | ClientQueryPayload::InitiateTrack(aircraft) => tracker.tracked(&aircraft),
+                        ClientQueryPayload::DropTrack(aircraft) => tracker.drop_tracked(&aircraft),
+                        ClientQueryPayload::SetBeaconCode(aircraft, _) => tracker.assigned_squawk(&aircraft),
                         _ => ()
                     },
                     PacketTypes::ATCPosition(position) => {
+                        // Do not capture vATIS traffic
                         if position.callsign.find("ATIS").is_none() {
-                            current_callsign = position.callsign.to_string();
-                            current_atc_position = Some(position);
+                            // Update and detect if wasn't connected before
+                            if tracker.update_atc_position(position) {
+                                // Just started controlling
+                                start_time = get_time();
+                            }
                         }
                     },
-                    PacketTypes::PilotPosition(position) => {
-                        current_callsign = position.callsign.to_string();
-                        current_pilot_position = Some(position);
-                    },
-                    PacketTypes::FlightStrip(s) => {
-                        if check_aircraft(&s.target) {
-                            strip_counter += 1;
-                        }
-                    }
+                    PacketTypes::PilotPosition(position) => {tracker.update_pilot_position(position);},
+                    PacketTypes::FlightStrip(s) => tracker.pushed_strip(&s.target),
                     _ => ()
                 }
                 Some(PacketSource::Server(packet)) => match packet {
-                    PacketTypes::PilotPosition(position) => {
-                        pilot_manager.process_position(&position);
-                    },
-                    PacketTypes::DeleteClient(client) =>  {
-                        pilot_manager.delete(&client.callsign);
-                        tracked_aircraft.remove(&client.callsign);
-                    }
+                    PacketTypes::PilotPosition(position) => tracker.add_pilot(&position),
+                    PacketTypes::DeleteClient(client) => tracker.remove_pilot(&client.callsign),
                     _ => ()
                 }
                 _ => {}
             }
         }
 
-        if last_callsign != current_callsign {start_time = get_time(); last_callsign = current_callsign.clone()}
-
         if tick % 100 == 0 {
             let details: String;
             let large_tooltip: String;
             let small_tooltip: String;
+            let callsign: String;
 
-            if let Some(position) = current_atc_position.as_ref() {
+            if let Some(position) = tracker.get_atc_position() {
                 match position.facility {
                     NetworkFacility::OBS | NetworkFacility::DEL | NetworkFacility::GND | NetworkFacility::Undefined => {
-                        details = format!("Seeing {} aircraft", pilot_manager.number_tracked());
-                        small_tooltip = format!("{} Squawks {} Strips", squawk_counter, strip_counter);
+                        details = format!("Seeing {} aircraft", tracker.get_number_seen());
+                        small_tooltip = format!("{} Squawks {} Strips", tracker.get_number_squawks(), tracker.get_number_strips());
                     },
                     _ => {
-                        details = format!("Tracking {}/{} aircraft", tracked_aircraft.len(), pilot_manager.number_tracked());
+                        details = format!("Tracking {}/{} aircraft", tracker.get_number_tracked(), tracker.get_number_seen());
                         small_tooltip = "".to_string()
                     }
                 };
+                callsign = position.callsign.to_string();
                 large_tooltip = format!("{} {}", position.rating.to_string(), position.freq.text.to_string());
             } else {
                 details = "Idling".to_string();
                 large_tooltip = "".to_string();
                 small_tooltip = "".to_string();
+                callsign = "".to_string()
             }
                 
             client.update_activity(
                 &Activity::empty()
-                    .with_details(&current_callsign)
+                    .with_details(&callsign)
                     .with_state(&details)
                     .with_start_time(start_time)
                     .with_large_image_key("radar")
@@ -183,15 +149,15 @@ fn main() {
                     .with_small_image_key("vatsim1")
                     .with_small_image_tooltip(&small_tooltip),
 
-                |discord: &Discord<()>, result| {
+                |_: &Discord<()>, result| {
                 if let Err(error) = result {
                     return eprintln!("failed to update activity: {}", error);
                 }
             });
         }
 
-        client.run_callbacks();
+        client.run_callbacks().ok();
         tick += 1;
-        std::thread::sleep(time::Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
