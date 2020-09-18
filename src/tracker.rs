@@ -1,6 +1,6 @@
 use fsdparser::{ATCPosition, PilotPosition};
 use std::{collections::{HashMap, HashSet}};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 fn get_time() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
@@ -35,6 +35,8 @@ impl LatLonPos {
 
 pub struct Tracker {
     callsign: String,
+    callsign_last_updated: Instant,
+
     current_atc_position: Option<ATCPosition>,
     current_pilot_position: Option<PilotPosition>,
     position: Option<LatLonPos>,
@@ -48,12 +50,15 @@ pub struct Tracker {
     // Counters
     number_squawks: u32,
     number_strips: u32,
+    number_handoffs: u32
 }
 
 impl Tracker {
     pub fn new() -> Self {
         Self {
             callsign: "".to_string(),
+            callsign_last_updated: Instant::now(),
+
             current_atc_position: None,
             current_pilot_position: None,
             position: None,
@@ -63,7 +68,8 @@ impl Tracker {
             counter_set: HashMap::new(),
 
             number_squawks: 0,
-            number_strips: 0
+            number_strips: 0,
+            number_handoffs: 0
         }
     }
 
@@ -89,6 +95,7 @@ impl Tracker {
         let was_updated = new_callsign.ne(&self.callsign);
 
         self.callsign = new_callsign;
+        self.callsign_last_updated = Instant::now();
 
         return was_updated;
     }
@@ -129,6 +136,13 @@ impl Tracker {
         self.number_strips += 1
     }
 
+    pub fn handoff(&mut self, callsign: &String) {
+        if !self.can_increment_counter(callsign) {return}
+        self.tracked(callsign);
+        self.set_cooldown(callsign);
+        self.number_handoffs += 1
+    }
+
     pub fn add_pilot(&mut self, position: &PilotPosition) {
         if let Some(pos) = self.position.as_ref() {
             if let Some(atc_pos) = self.current_atc_position.as_ref() {
@@ -167,6 +181,10 @@ impl Tracker {
         return self.tracked_aircraft.len()
     }
 
+    pub fn get_number_handoffs(&self) -> u32 {
+        return self.number_handoffs
+    }
+
     pub fn is_atc(&self) -> bool {
         return self.current_atc_position.is_some();
     }
@@ -181,5 +199,19 @@ impl Tracker {
 
     pub fn get_current_callsign(&self) -> &String {
         return &self.callsign;
+    }
+
+    pub fn get_secs_since_last_callsign(&self) -> u64 {
+        return self.callsign_last_updated.elapsed().as_secs();
+    }
+
+    pub fn reset(&mut self) {
+        self.current_atc_position = None;
+        self.current_pilot_position = None;
+        self.number_squawks = 0;
+        self.number_strips = 0;
+        self.tracked_aircraft.clear();
+        self.pilots_seen.clear();
+        self.counter_set.clear();
     }
 }

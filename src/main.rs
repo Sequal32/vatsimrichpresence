@@ -23,7 +23,7 @@ fn main() {
     let mut app = Application::new().unwrap();
 
     //Prompts user for the interface to use
-    let mut interfaces = sniffer.get_available_interfaces();
+    let interfaces = sniffer.get_available_interfaces();
     let selected_interface: Arc<Mutex<Option<NetworkInterface>>> = Arc::new(Mutex::new(None));
 
     // Read interface from config
@@ -85,7 +85,8 @@ fn main() {
             match sniffer.next() {
                 Some(PacketSource::Client(packet)) => match packet {
                     PacketTypes::ClientQuery(query) => match query.payload {
-                        ClientQueryPayload::AcceptHandoff(aircraft, _) | ClientQueryPayload::InitiateTrack(aircraft) => tracker.tracked(&aircraft),
+                        ClientQueryPayload::AcceptHandoff(aircraft, _) => tracker.handoff(&aircraft),
+                        ClientQueryPayload::InitiateTrack(aircraft) => tracker.tracked(&aircraft),
                         ClientQueryPayload::DropTrack(aircraft) => tracker.drop_tracked(&aircraft),
                         ClientQueryPayload::SetBeaconCode(aircraft, _) => tracker.assigned_squawk(&aircraft),
                         _ => ()
@@ -119,6 +120,10 @@ fn main() {
             let small_tooltip: String;
             let callsign: String;
 
+            if tracker.get_secs_since_last_callsign() > 60 {
+                tracker.reset();
+            }
+
             if let Some(position) = tracker.get_atc_position() {
                 match position.facility {
                     NetworkFacility::OBS | NetworkFacility::DEL | NetworkFacility::GND | NetworkFacility::Undefined => {
@@ -127,7 +132,7 @@ fn main() {
                     },
                     _ => {
                         details = format!("Tracking {}/{} aircraft", tracker.get_number_tracked(), tracker.get_number_seen());
-                        small_tooltip = "".to_string()
+                        small_tooltip = format!("{} Handoffs", tracker.get_number_handoffs());
                     }
                 };
                 callsign = position.callsign.to_string();

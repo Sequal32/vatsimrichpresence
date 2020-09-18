@@ -8,9 +8,8 @@ edition = "2018"
 
 [dependencies]
 discord_game_sdk = "1.0"
-fsdparser = {path = "modules/vatsimfsdparser"}
-pnet = {path = "modules/vatsimfsdparser/modules/libpnet"}
+fsdparser = {git = "https://github.com/Sequal32/vatsimfsdparser.git", features=["sniffer"]}
+pnet = {git = "https://github.com/Sequal32/libpnet.git"}
 serde_json = "1.0"
 systray = "0.4"
 text_io = "0.1"
-webview = "0.1"
